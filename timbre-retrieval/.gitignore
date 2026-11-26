@@ -1,0 +1,8 @@
+# generated artifacts (rebuild with `npm run all`)
+data/wav/
+data/corpus_raw/
+data/corpus_equalized/
+data/index/
+data/evaluation/
+data/replacement/
+data/manifest.json

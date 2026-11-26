@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>音色相似素材检索</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>音色相似素材检索工具</h1>
+  <p class="sub">
+    默认相似性：训练分组上拟合 z-score 后，对频谱形状 / 时间包络 / 音高三组描述符做块加权欧氏距离；
+    平均响度与时长不进入默认音色向量。这是可验证的信号层面定义，不声称适用于所有人的听觉偏好。
+  </p>
+</header>
+
+<section class="controls card">
+  <div class="row">
+    <label>查询声音
+      <select id="querySelect"></select>
+    </label>
+    <label>检索目标
+      <select id="targetSelect">
+        <option value="general">一般音色</option>
+        <option value="prop">道具身份（频谱/模态为主）</option>
+        <option value="force">动作力度（瞬态/包络为主）</option>
+      </select>
+    </label>
+    <label>响度处理
+      <select id="modeSelect">
+        <option value="eq">等响度（消除前级增益）</option>
+        <option value="raw">原动态（保留录音电平）</option>
+      </select>
+    </label>
+    <label>距离度量
+      <select id="metricSelect">
+        <option value="euclidean">加权欧氏（默认）</option>
+        <option value="cosine">余弦（备选，非“更优”）</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <label class="chk"><input type="checkbox" id="pitchToggle" checked> 包含音高块</label>
+    <label class="chk"><input type="checkbox" id="loudToggle"> 包含绝对响度块（原动态时默认开）</label>
+    <label class="chk"><input type="checkbox" id="leakToggle" checked> 排除查询同源分组（防泄漏）</label>
+    <label>导入自制 WAV 作为查询
+      <input type="file" id="importFile" accept=".wav,audio/wav">
+    </label>
+    <button id="searchBtn">检索</button>
+    <button id="resetBtn" class="ghost">重置反馈</button>
+  </div>
+  <p class="hint" id="modeHint"></p>
+</section>
+
+<main class="grid">
+  <section class="card" id="analysisCard">
+    <h2>声音分析窗口</h2>
+    <div class="clip-head">
+      <span id="queryId" class="mono"></span>
+      <audio id="queryAudio" controls preload="none"></audio>
+    </div>
+    <canvas id="waveCanvas" width="520" height="90"></canvas>
+    <canvas id="specCanvas" width="520" height="180"></canvas>
+    <canvas id="envCanvas" width="520" height="90"></canvas>
+    <h3>明确音色属性（实测值）</h3>
+    <div id="featureTable" class="feature-table"></div>
+  </section>
+
+  <section class="card" id="resultsCard">
+    <h2>相似排序与实际素材</h2>
+    <p class="hint">文件名是中性 ID，不含任何乐器/道具词；排序只来自特征距离，不读取文件名或文件大小。</p>
+    <div id="results"></div>
+    <div class="feedback-bar">
+      <span class="hint">失败反馈回检索内核：在候选上标记“相近/不符”，提交后用 Rocchio 重排。</span>
+      <button id="feedbackBtn" class="ghost">提交反馈并重排</button>
+    </div>
+  </section>
+</main>
+
+<section class="card" id="filmCard">
+  <h2>关门声替换（由检索内核驱动）</h2>
+  <div class="film-layout">
+    <canvas id="doorCanvas" width="360" height="260"></canvas>
+    <div class="film-side">
+      <p class="hint">三个关门事件的查询声音经同一检索内核取首候选，混入替换轨。排除事件同源分组，避免选回自己。</p>
+      <div id="placementList"></div>
+      <div class="row">
+        <button id="replaceBtn">生成替换轨</button>
+        <button id="playFilmBtn">播放替换“影片”</button>
+        <button id="stopFilmBtn" class="ghost">停止</button>
+      </div>
+      <audio id="replaceAudio" controls preload="none"></audio>
+      <a id="replaceDownload" class="hint" download>下载替换轨 WAV</a>
+    </div>
+  </div>
+</section>
+
+<section class="card" id="evalCard">
+  <h2>留出核对与对照实验</h2>
+  <div id="evalBody" class="hint">加载中…</div>
+</section>
+
+<footer>
+  <p class="hint">
+    指标与归一化统计量仅在训练源分组拟合，评估分组不参与调参；同一来源的增益孪生共享 group，
+    拆分时整组留出。所有数字可由 <code>npm run evaluate</code> 复算。
+  </p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "timbre-retrieval",
+  "version": "1.0.0",
+  "description": "Timbral-similarity retrieval for self-recorded short impact sounds, with loudness-normalization/dynamics-preserving comparisons, grouped leakage-safe evaluation, a browser UI, and door-sound replacement track.",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "node src/cli/build.js",
+    "index": "node src/cli/index.js",
+    "evaluate": "node src/cli/evaluate.js",
+    "replace": "node src/cli/replace.js",
+    "all": "node src/cli/all.js",
+    "serve": "node src/server/server.js"
+  },
+  "dependencies": {}
+}
