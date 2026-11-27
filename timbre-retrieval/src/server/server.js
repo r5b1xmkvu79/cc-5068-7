@@ -4,14 +4,17 @@ import { existsSync, createReadStream } from 'node:fs';
 import path from 'node:path';
 import {
   PORT, ROOT, MANIFEST, INDEX_DIR, CORPUS_RAW, CORPUS_EQ,
-  REPLACE_DIR, SR,
+  REPLACE_DIR, SR, QUERY_DIR, QUERYSET, PUBLISH_DIR,
 } from '../config.js';
-import { search, adaptQuery } from '../core/retrieve.js';
+import { search, adaptQuery, searchExternal, externalVectors } from '../core/retrieve.js';
 import { buildReplacement } from '../core/replace.js';
 import { readWav, toMono, writeWav } from '../dsp/wav.js';
 import { resampleTo, trimSilence, rmsDb, equalizeLoudness } from '../dsp/loudness.js';
 import { extractFeatures } from '../dsp/features.js';
 import { fitStats, vectorize } from '../core/distance.js';
+import { buildQuerySet } from '../accept/queryset.js';
+import { runAcceptance, decidePublish } from '../accept/gate.js';
+import { validateQuerySignal } from '../accept/validate.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -29,6 +32,39 @@ let indexCache = null;
 const getIndex = async () => {
   if (!indexCache) indexCache = await load(path.join(INDEX_DIR, 'index.json'));
   return indexCache;
+};
+
+// Acceptance query set (回归样例): loaded on demand, features computed with
+// the same public pipeline and cached per query id.
+let querysetCache = null;
+const getQueryset = async () => {
+  if (!querysetCache) {
+    if (!existsSync(QUERYSET)) querysetCache = await buildQuerySet();
+    else querysetCache = await load(QUERYSET);
+  }
+  return querysetCache;
+};
+const queryDataCache = new Map();
+const getQueryData = async (id, index) => {
+  if (queryDataCache.has(id)) return queryDataCache.get(id);
+  const queryset = await getQueryset();
+  const meta = queryset.queries.find((q) => q.id === id);
+  if (!meta) throw new Error(`unknown acceptance query ${id}`);
+  const wav = readWav(await readFile(path.join(QUERY_DIR, meta.file)));
+  const samples = trimSilence(resampleTo(toMono(wav), wav.sampleRate), SR);
+  const check = validateQuerySignal(samples, SR);
+  if (!check.ok) throw new Error(`查询信号无效：${check.reason}`);
+  const eq = equalizeLoudness(samples, -26).samples;
+  const fRaw = extractFeatures(samples, SR);
+  const fEq = extractFeatures(eq, SR);
+  const data = {
+    meta,
+    features: fEq.features,
+    curves: fEq.curves,
+    vecs: externalVectors(index, fRaw.features, fEq.features),
+  };
+  queryDataCache.set(id, data);
+  return data;
 };
 
 const json = (res, code, obj) => {
@@ -171,10 +207,72 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, report);
       }
 
+      // ---------- acceptance (验收) ----------
+      if (p === '/api/accept/state') {
+        const queryset = await getQueryset();
+        const decisionFile = path.join(PUBLISH_DIR, 'decision.json');
+        return json(res, 200, {
+          queries: queryset.queries.map((q) => ({
+            id: q.id, kind: q.kind, performer: q.performer || null,
+          })),
+          registry: queryset.registry,
+          unseenPerformers: queryset.unseenPerformers,
+          lastDecision: existsSync(decisionFile) ? await load(decisionFile) : null,
+          published: existsSync(path.join(PUBLISH_DIR, 'index.json')),
+        });
+      }
+
+      if (p === '/api/accept/features') {
+        const id = url.searchParams.get('id');
+        const data = await getQueryData(id, index);
+        return json(res, 200, {
+          id, kind: data.meta.kind,
+          features: data.features,
+          curves: data.curves,
+        });
+      }
+
+      if (p === '/api/accept/search' && req.method === 'POST') {
+        const body = await readBody(req);
+        const data = await getQueryData(body.queryId, index);
+        const out = searchExternal(index, body.queryId, data.vecs, {
+          target: body.target || 'general',
+          loudnessMode: body.loudnessMode || 'eq',
+          usePitch: body.usePitch !== false,
+          useLoudness: body.useLoudness,
+          metric: body.metric || 'euclidean',
+        });
+        const meta = new Map(manifest.records.map((r) => [r.id, r]));
+        out.results = out.results.map((r) => ({
+          ...r,
+          gainTag: meta.get(r.id)?.gainTag,
+          duration: meta.get(r.id)?.duration,
+          kind: meta.get(r.id)?.kind,
+        }));
+        return json(res, 200, out);
+      }
+
+      if (p === '/api/accept/run' && req.method === 'POST') {
+        // Rebuild the query set so the gate always runs on fresh material,
+        // then publish or reject the current index version.
+        querysetCache = await buildQuerySet();
+        queryDataCache.clear();
+        const report = await runAcceptance({ index, manifest, queryset: querysetCache });
+        const decision = await decidePublish(report);
+        return json(res, 200, { report, decision });
+      }
+
       return json(res, 404, { error: 'unknown api route' });
     }
 
     // ---------- static ----------
+    if (p.startsWith('/audio/accept/')) {
+      const name = path.basename(p.replace('/audio/accept/', ''));
+      const file = path.join(QUERY_DIR, name);
+      if (!existsSync(file)) return json(res, 404, { error: 'no audio' });
+      res.writeHead(200, { 'content-type': 'audio/wav', 'accept-ranges': 'bytes' });
+      return createReadStream(file).pipe(res);
+    }
     if (p.startsWith('/audio/')) {
       const mode = url.searchParams.get('mode') === 'raw' ? CORPUS_RAW : CORPUS_EQ;
       const name = path.basename(p.replace('/audio/', ''));

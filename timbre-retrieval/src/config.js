@@ -3,7 +3,8 @@ import { dirname, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(here, '..');
-export const DATA = resolve(ROOT, 'data');
+// TIMBRE_DATA_DIR lets the test-suite run against a throwaway copy of the data.
+export const DATA = resolve(ROOT, process.env.TIMBRE_DATA_DIR || 'data');
 export const WAV_DIR = resolve(DATA, 'wav');
 export const CORPUS_RAW = resolve(DATA, 'corpus_raw');
 export const CORPUS_EQ = resolve(DATA, 'corpus_equalized');
@@ -11,6 +12,10 @@ export const INDEX_DIR = resolve(DATA, 'index');
 export const EVAL_DIR = resolve(DATA, 'evaluation');
 export const REPLACE_DIR = resolve(DATA, 'replacement');
 export const MANIFEST = resolve(DATA, 'manifest.json');
+export const ACCEPT_DIR = resolve(DATA, 'accept');
+export const QUERY_DIR = resolve(ACCEPT_DIR, 'queries');
+export const QUERYSET = resolve(ACCEPT_DIR, 'queryset.json');
+export const PUBLISH_DIR = resolve(ACCEPT_DIR, 'published');
 export const PORT = Number(process.env.PORT || 8123);
 
 export const SR = 22050;

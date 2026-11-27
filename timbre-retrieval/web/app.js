@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   clips: [], index: null, lastResults: [], marks: new Map(), queryGroup: null,
+  acceptQueries: [], acceptQueryIds: new Set(),
 };
 
 const BLOCK_CN = {
@@ -74,9 +75,14 @@ function drawSpecgram(canvas, curves) {
 // ---------- analysis window ----------
 async function showAnalysis(id) {
   const mode = $('modeSelect').value;
-  const data = await api(`/api/features?id=${encodeURIComponent(id)}&mode=${mode}`);
-  $('queryId').textContent = id;
-  $('queryAudio').src = `/audio/${id}.wav?mode=${mode}`;
+  const isAccept = state.acceptQueryIds.has(id);
+  const data = isAccept
+    ? await api(`/api/accept/features?id=${encodeURIComponent(id)}`)
+    : await api(`/api/features?id=${encodeURIComponent(id)}&mode=${mode}`);
+  $('queryId').textContent = isAccept ? `${id}（验收回归样例）` : id;
+  $('queryAudio').src = isAccept
+    ? `/audio/accept/${id}.wav`
+    : `/audio/${id}.wav?mode=${mode}`;
   drawSeries($('waveCanvas'), data.curves.waveform);
   drawSpecgram($('specCanvas'), data.curves);
   drawSeries($('envCanvas'), data.curves.envelope, '#65d18a', false);
@@ -112,16 +118,23 @@ function currentOptions() {
 
 async function runSearch(adapted = false) {
   const queryId = $('querySelect').value;
+  const isAccept = state.acceptQueryIds.has(queryId);
   const clip = state.clips.find((c) => c.id === queryId);
-  state.queryGroup = clip.group;
+  state.queryGroup = clip ? clip.group : null;
   const opts = currentOptions();
-  const out = adapted
-    ? await api('/api/feedback', {
-      queryId, ...opts,
-      relevant: [...state.marks].filter(([, v]) => v === 'rel').map(([id]) => id),
-      irrelevant: [...state.marks].filter(([, v]) => v === 'irr').map(([id]) => id),
-    })
-    : await api('/api/search', { queryId, ...opts });
+  let out;
+  if (isAccept) {
+    // 回归样例：索引外查询，复用训练集拟合的统计量，实际运算。
+    out = await api('/api/accept/search', { queryId, ...opts });
+  } else {
+    out = adapted
+      ? await api('/api/feedback', {
+        queryId, ...opts,
+        relevant: [...state.marks].filter(([, v]) => v === 'rel').map(([id]) => id),
+        irrelevant: [...state.marks].filter(([, v]) => v === 'irr').map(([id]) => id),
+      })
+      : await api('/api/search', { queryId, ...opts });
+  }
   state.lastResults = out.results;
   renderResults(out);
   updateModeHint(out);
@@ -282,17 +295,90 @@ async function loadEval() {
   <p class="hint">${r.definition.caveat}</p>`;
 }
 
+// ---------- acceptance panel ----------
+const KIND_CN = {
+  segment: '同源裁片', rerecord: '重录', hardneg_positive: '困难负例·正',
+  hardneg_negative: '困难负例·反', invalid: '无效输入', duplicate: '重复文件',
+};
+
+function renderAcceptDecision(decision, report) {
+  const m = report ? report.metrics : decision.metrics;
+  const head = decision.decision === 'published'
+    ? '<p><b class="ok">已发布</b> — 当前索引版本通过验收，已写入 data/accept/published/。</p>'
+    : '<p><b class="no">已拒绝</b> — 当前索引版本未通过验收，发布目录已清除。</p>';
+  const metrics = m ? `
+    <table class="metrics">
+      <tr><th>证据</th><th>通过</th><th>总数</th></tr>
+      <tr><td>同源裁片查重</td><td>${m.dedup.pass}</td><td>${m.dedup.n}</td></tr>
+      <tr><td>未见演奏者重录（首位命中率 ${m.generalization.top1}）</td>
+          <td>${m.generalization.pass}</td><td>${m.generalization.n}</td></tr>
+      <tr><td>困难负例</td><td>${m.hardNegative.pass}</td><td>${m.hardNegative.n}</td></tr>
+      <tr><td>无效输入拒绝</td><td>${m.invalid.rejected}</td><td>${m.invalid.n}</td></tr>
+      <tr><td>重复文件检出</td><td colspan="2">${m.duplicates.detected}</td></tr>
+    </table>` : '';
+  const reasons = (decision.reasons || []).length
+    ? `<p><b>未通过原因：</b></p><ul class="findings">${decision.reasons.map((r) => `<li>${r}</li>`).join('')}</ul>`
+    : '';
+  const swap = report && report.loudnessSwap && report.loudnessSwap.firstReversedClass
+    ? `<p class="hint">响度统计错换诊断：${report.loudnessSwap.firstReversedClass} 类排序首先反转
+       （独立响度分析预期：${report.loudnessSwap.independentExpectation.victim ?? '无'}）。</p>`
+    : '';
+  $('acceptBody').innerHTML = head + metrics + reasons + swap;
+}
+
+async function runAcceptance() {
+  $('acceptRunBtn').disabled = true;
+  $('acceptStatus').textContent = '验收运行中（重建查询集并逐项核对，约需数秒）…';
+  try {
+    const { report, decision } = await api('/api/accept/run', {});
+    renderAcceptDecision(decision, report);
+    $('acceptStatus').textContent = `完成于 ${new Date(report.generatedAt).toLocaleTimeString()}`;
+  } catch (e) {
+    $('acceptBody').innerHTML = `<p><b class="no">验收异常</b>：${e.message}</p>`;
+    $('acceptStatus').textContent = '失败';
+  } finally {
+    $('acceptRunBtn').disabled = false;
+  }
+}
+
+async function loadAcceptState() {
+  const s = await api('/api/accept/state');
+  state.acceptQueries = s.queries;
+  state.acceptQueryIds = new Set(s.queries.map((q) => q.id));
+  if (s.lastDecision) {
+    renderAcceptDecision(s.lastDecision, null);
+    $('acceptStatus').textContent = `上次验收：${s.lastDecision.decision === 'published' ? '已发布' : '已拒绝'}（${new Date(s.lastDecision.at).toLocaleString()}）`;
+  }
+  return s;
+}
+
 // ---------- wiring ----------
 async function init() {
   const s = await api('/api/state');
   state.clips = s.clips;
-  $('querySelect').innerHTML = s.clips
-    .map((c) => `<option value="${c.id}">${c.id}</option>`).join('');
+  try {
+    await loadAcceptState();
+  } catch (e) {
+    $('acceptBody').textContent = '验收查询集不可用：' + e.message + '（可点击“运行验收”重建）';
+  }
+  const mainGroup = `<optgroup label="索引剪辑">${s.clips
+    .map((c) => `<option value="${c.id}">${c.id}</option>`).join('')}</optgroup>`;
+  const acceptGroup = state.acceptQueries.length
+    ? `<optgroup label="验收回归样例（索引外查询）">${state.acceptQueries
+      .map((q) => `<option value="${q.id}">${q.id}（${KIND_CN[q.kind] || q.kind}）</option>`).join('')}</optgroup>`
+    : '';
+  $('querySelect').innerHTML = mainGroup + acceptGroup;
   $('querySelect').addEventListener('change', () => showAnalysis($('querySelect').value));
   $('modeSelect').addEventListener('change', () => showAnalysis($('querySelect').value));
   $('searchBtn').addEventListener('click', () => runSearch(false));
   $('resetBtn').addEventListener('click', () => { state.marks.clear(); runSearch(false); });
-  $('feedbackBtn').addEventListener('click', () => runSearch(true));
+  $('feedbackBtn').addEventListener('click', () => {
+    if (state.acceptQueryIds.has($('querySelect').value)) {
+      $('modeHint').textContent = '验收回归样例在索引之外，反馈重排仅适用于索引内查询。';
+      return;
+    }
+    runSearch(true);
+  });
   $('importFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -309,6 +395,7 @@ async function init() {
   });
   $('replaceBtn').addEventListener('click', () =>
     buildReplacementTrack().then(() => {}).catch((e) => alert(e.message)));
+  $('acceptRunBtn').addEventListener('click', runAcceptance);
   $('playFilmBtn').addEventListener('click', playFilm);
   $('stopFilmBtn').addEventListener('click', () => { stopFilm(); $('replaceAudio').pause(); });
   drawDoor(0, false);

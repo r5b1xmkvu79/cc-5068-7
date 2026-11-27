@@ -10,6 +10,8 @@
     "evaluate": "node src/cli/evaluate.js",
     "replace": "node src/cli/replace.js",
     "all": "node src/cli/all.js",
+    "accept": "node src/cli/accept.js",
+    "test": "node --test 'test/**/*.test.js'",
     "serve": "node src/server/server.js"
   },
   "dependencies": {}

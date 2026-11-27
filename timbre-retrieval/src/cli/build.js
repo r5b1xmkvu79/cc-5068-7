@@ -10,7 +10,7 @@ import path from 'node:path';
 import { WAV_DIR, CORPUS_RAW, CORPUS_EQ, MANIFEST, SR } from '../config.js';
 import { synthesize, propList, forceList } from '../dsp/synth.js';
 import { writeWav } from '../dsp/wav.js';
-import { equalizeLoudness, rmsDb, peakDb } from '../dsp/loudness.js';
+import { equalizeLoudness, rmsDb, peakDb, trimSilence } from '../dsp/loudness.js';
 
 const TARGET_RMS_DB = -26;
 const GAINS = [{ tag: 'lo', db: -12 }, { tag: 'hi', db: 6 }];
@@ -23,13 +23,16 @@ async function cleanDirs() {
 }
 
 async function emit(rec, samples) {
-  const raw = Buffer.from(writeWav(samples, SR, 16));
+  // Trim first so the equalized twin hits the target RMS tightly (the
+  // equalized library is what the loudness-swap diagnostic relies on).
+  const trimmed = trimSilence(samples, SR);
+  const raw = Buffer.from(writeWav(trimmed, SR, 16));
   await writeFile(path.join(CORPUS_RAW, rec.id + '.wav'), raw);
-  const eq = equalizeLoudness(samples, TARGET_RMS_DB);
+  const eq = equalizeLoudness(trimmed, TARGET_RMS_DB);
   const eqBuf = Buffer.from(writeWav(eq.samples, SR, 16));
   await writeFile(path.join(CORPUS_EQ, rec.id + '.wav'), eqBuf);
-  rec.rawRmsDb = +rmsDb(samples).toFixed(2);
-  rec.rawPeakDb = +peakDb(samples).toFixed(2);
+  rec.rawRmsDb = +rmsDb(trimmed).toFixed(2);
+  rec.rawPeakDb = +peakDb(trimmed).toFixed(2);
   rec.eqRmsDb = +rmsDb(eq.samples).toFixed(2);
   rec.eqAppliedDb = +eq.gainDb.toFixed(2);
   rec.gainDb = rec.gainDb ?? 0;
@@ -40,7 +43,8 @@ export async function buildCorpus() {
   const records = [];
   let seed = 1000;
   const make = (id, group, meta) => {
-    const { samples, sr } = synthesize({ seed: seed++, ...meta });
+    const recSeed = seed++;
+    const { samples, sr } = synthesize({ seed: recSeed, ...meta });
     const rec = {
       id,
       group,
@@ -52,6 +56,7 @@ export async function buildCorpus() {
       gainDb: meta.gainDb ?? 0,
       pitchShift: meta.pitchShift ?? 0,
       excitation: meta.excitation ?? 'strike',
+      seed: recSeed,
       duration: +(samples.length / sr).toFixed(3),
     };
     records.push(rec);

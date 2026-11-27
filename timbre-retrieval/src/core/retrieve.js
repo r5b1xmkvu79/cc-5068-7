@@ -4,44 +4,41 @@ import {
   weightedDistance, cosineDistance, explain, vectorize,
 } from './distance.js';
 
-// Rank candidates for a query clip already present in the index.
-// options:
-//   target       prop | force | general
-//   loudnessMode eq (equalized, gain removed) | raw (dynamics preserved)
-//   usePitch     include pitch block in timbre
-//   useLoudness  include absolute loudness block (defaults ON in raw mode)
-//   metric       euclidean | cosine
-//   excludeGroups  groups banned from candidates (leakage control)
-//   excludeIds     ids banned (e.g. the query itself)
-//   adaptedZ     optional Rocchio-adapted query vector (re-ranking)
-export function search(index, queryId, options = {}) {
+const LOUD_WEIGHT = 1.0;
+
+// z-scored vectors for a clip that lives OUTSIDE the index (acceptance query
+// set, user import). Uses the already-fitted train statistics; the external
+// clip never re-fits anything.
+export function externalVectors(index, featuresRaw, featuresEq) {
+  const z = (f, stats) => vectorize(f).map((v, i) => (v - stats.mean[i]) / stats.std[i]);
+  const zL = (f, stats) => vectorize(f, LOUDNESS_KEYS)
+    .map((v, i) => (v - stats.mean[i]) / stats.std[i]);
+  return {
+    eq: { z: z(featuresEq, index.stats.eq), zLoud: zL(featuresEq, index.stats.loudEq) },
+    raw: { z: z(featuresRaw, index.stats.raw), zLoud: zL(featuresRaw, index.stats.loudRaw) },
+  };
+}
+
+// Core ranking given prepared query vectors. Shared by in-index queries
+// (search) and out-of-index queries (searchExternal).
+function rank(index, vecs, options) {
   const {
     target = 'general',
     loudnessMode = 'eq',
     usePitch = true,
     metric = 'euclidean',
     excludeGroups = [],
-    excludeIds = [queryId],
+    excludeIds = [],
     adaptedZ = null,
   } = options;
   const useLoudness = options.useLoudness ?? (loudnessMode === 'raw');
-  const LOUD_WEIGHT = 1.0;
-
-  const qrow = index.rows.find((r) => r.id === queryId);
-  if (!qrow) throw new Error(`unknown query id ${queryId}`);
   const mode = loudnessMode === 'raw' ? 'raw' : 'eq';
-  const stats = index.stats[mode];
-  const loudStats = index.stats[mode === 'raw' ? 'loudRaw' : 'loudEq'];
-  let qz = adaptedZ
-    || vectorize(qrow[mode].features).map((v, i) => (v - stats.mean[i]) / stats.std[i]);
+
+  let qz = adaptedZ || vecs[mode].z;
   let weights = featureWeights(target, usePitch);
   const allKeys = [...TIMBRE_KEYS];
   if (useLoudness) {
-    if (!adaptedZ) {
-      const qLoud = vectorize(qrow[mode].features, LOUDNESS_KEYS)
-        .map((v, i) => (v - loudStats.mean[i]) / loudStats.std[i]);
-      qz = [...qz, ...qLoud];
-    }
+    if (!adaptedZ) qz = [...qz, ...vecs[mode].zLoud];
     weights = appendLoudnessWeights(weights, LOUD_WEIGHT);
     allKeys.push(...LOUDNESS_KEYS);
   }
@@ -67,9 +64,41 @@ export function search(index, queryId, options = {}) {
   }
   results.sort((a, b) => a.distance - b.distance);
   return {
-    query: { id: qrow.id, group: qrow.group, kind: qrow.kind },
     target, loudnessMode: mode, usePitch, useLoudness, metric,
     results,
+  };
+}
+
+// Rank candidates for a query clip already present in the index.
+// options:
+//   target       prop | force | general
+//   loudnessMode eq (equalized, gain removed) | raw (dynamics preserved)
+//   usePitch     include pitch block in timbre
+//   useLoudness  include absolute loudness block (defaults ON in raw mode)
+//   metric       euclidean | cosine
+//   excludeGroups  groups banned from candidates (leakage control)
+//   excludeIds     ids banned (e.g. the query itself)
+//   adaptedZ     optional Rocchio-adapted query vector (re-ranking)
+export function search(index, queryId, options = {}) {
+  const qrow = index.rows.find((r) => r.id === queryId);
+  if (!qrow) throw new Error(`unknown query id ${queryId}`);
+  const out = rank(index, {
+    eq: { z: qrow.eq.z, zLoud: qrow.eq.zLoud },
+    raw: { z: qrow.raw.z, zLoud: qrow.raw.zLoud },
+  }, { excludeIds: [queryId], ...options });
+  return {
+    query: { id: qrow.id, group: qrow.group, kind: qrow.kind },
+    ...out,
+  };
+}
+
+// Rank candidates for a query that is NOT part of the index (the acceptance
+// query set, or an imported recording). vecs comes from externalVectors().
+export function searchExternal(index, queryId, vecs, options = {}) {
+  const out = rank(index, vecs, options);
+  return {
+    query: { id: queryId, group: null, kind: 'external' },
+    ...out,
   };
 }
 

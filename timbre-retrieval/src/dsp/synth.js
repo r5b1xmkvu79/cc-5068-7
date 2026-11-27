@@ -66,19 +66,37 @@ function gaussian(rand) {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
-// One rendered impact. options: { prop, force, template, gainDb, pitchShift, excitation, seed }
+// One rendered impact. options: { prop, force, template, gainDb, pitchShift, excitation, seed, performerSeed }
+// performerSeed != 0 renders a "re-recording by an unseen performer": the same
+// physical object and action, but with performer-level variation (impulse
+// scaling, t60 drift, onset shift, mild spectral tilt) drawn from that seed.
+// The main corpus always uses performerSeed 0 (neutral factors).
 export function synthesize(options) {
   const {
     prop, force, template = 0, gainDb = 0,
-    pitchShift = 0, excitation = 'strike', seed = 1,
+    pitchShift = 0, excitation = 'strike', seed = 1, performerSeed = 0,
   } = options;
   const cfg = PROPS[prop];
   const fz = FORCE[force];
   const rand = rng(seed);
+
+  // Performer-level physical variation (deterministic per performerSeed).
+  let perfImpulse = 1, perfT60 = 1, perfOnset = 0, perfTilt = 0;
+  let perfDrift = null;
+  if (performerSeed) {
+    const prand = rng(performerSeed * 2654435761);
+    perfImpulse = 0.88 + prand() * 0.24;      // how hard this performer hits
+    perfT60 = 0.92 + prand() * 0.16;          // their instrument's decay drift
+    perfOnset = prand() * 0.012;              // mic/placement delay up to 12 ms
+    perfTilt = (prand() - 0.5) * 0.3;         // mild spectral tilt (mic color)
+    // their instrument instance: every mode tunes slightly differently
+    perfDrift = cfg.modes.map(() => 1 + (prand() - 0.5) * 0.08);
+  }
+
   const dur = force === 'heavy' ? 1.15 : 0.9;
   const n = Math.floor(SR * dur);
   const out = new Float64Array(n);
-  const t0 = 0.02 + rand() * fz.onsetJitter;
+  const t0 = 0.02 + rand() * fz.onsetJitter + perfOnset;
   const n0 = Math.floor(t0 * SR);
   const pitchMul = 2 ** (pitchShift / 12);
 
@@ -86,25 +104,29 @@ export function synthesize(options) {
   const jitter = (v) => v * (1 + (rand() - 0.5) * 0.06 + (template - 1) * 0.012);
 
   // Modal ring: exponentially decaying sinusoids with slight frequency mistuning.
-  for (const m of cfg.modes) {
-    const f = jitter(m.f) * pitchMul * (1 + cfg.inharmonic * (m.f / 100) ** 2);
-    const t60 = m.t60 * fz.t60Scale * (0.9 + rand() * 0.2);
-    const amp = m.g * fz.impulse * (0.85 + rand() * 0.3);
+  cfg.modes.forEach((m, mi) => {
+    const drift = perfDrift ? perfDrift[mi] : 1;
+    const f = jitter(m.f) * pitchMul * drift * (1 + cfg.inharmonic * (m.f / 100) ** 2);
+    const t60 = m.t60 * fz.t60Scale * perfT60 * (0.9 + rand() * 0.2);
+    const amp = m.g * fz.impulse * perfImpulse
+      * (f / 500) ** perfTilt
+      * (0.85 + rand() * 0.3);
     const phase = rand() * 2 * Math.PI;
     const alpha = -Math.log(1000) / t60; // amplitude decay to -60 dB
     for (let i = n0; i < n; i++) {
       const t = (i - n0) / SR;
       out[i] += amp * Math.exp(alpha * t) * Math.sin(2 * Math.PI * f * t + phase);
     }
-  }
+  });
 
   // Air thump (low-frequency puff) for the hollow panel.
   if (cfg.airThump) {
-    const f = 58 * pitchMul;
+    const thumpDrift = perfDrift ? perfDrift[0] : 1;
+    const f = 58 * pitchMul * thumpDrift;
     const alpha = -Math.log(1000) / 0.12;
     for (let i = n0; i < n; i++) {
       const t = (i - n0) / SR;
-      out[i] += 0.5 * fz.impulse * Math.exp(alpha * t) * Math.sin(2 * Math.PI * f * t);
+      out[i] += 0.5 * fz.impulse * perfImpulse * Math.exp(alpha * t) * Math.sin(2 * Math.PI * f * t);
     }
   }
 
@@ -157,3 +179,8 @@ export function synthesize(options) {
 
 export function propList() { return Object.keys(PROPS); }
 export function forceList() { return Object.keys(FORCE); }
+// Physical parameter tables, exported for the independent reference model in
+// src/accept/reference.js (expectations derived from physics, not from the
+// retrieval distance function).
+export function propParams(prop) { return PROPS[prop]; }
+export function forceParams(force) { return FORCE[force]; }

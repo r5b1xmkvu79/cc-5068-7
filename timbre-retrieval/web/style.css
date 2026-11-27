@@ -74,4 +74,7 @@ table.metrics { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 table.metrics th, table.metrics td { border: 1px solid var(--line); padding: 5px 8px; text-align: center; }
 table.metrics th { color: var(--muted); font-weight: 600; }
 .ok { color: var(--good); } .no { color: var(--bad); }
+ul.findings { margin: 6px 0; padding-left: 18px; font-size: 12.5px; }
+ul.findings li { margin-bottom: 4px; color: var(--bad); }
+#acceptBody table.metrics td:first-child { text-align: left; }
 footer { margin-top: 10px; }

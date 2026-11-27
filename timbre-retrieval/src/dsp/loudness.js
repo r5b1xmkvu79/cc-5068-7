@@ -49,8 +49,14 @@ export function resampleTo(x, srIn, srOut = SR) {
   return out;
 }
 
-export function trimSilence(x, sr, threshDb = -55, padMs = 10) {
-  const thresh = 10 ** (threshDb / 20);
+// Silence trim with a PEAK-RELATIVE threshold (plus an absolute floor).
+// An absolute-only threshold trims the equalized library harder than the raw
+// twin of the same recording (their noise floors sit on opposite sides of
+// the fixed line), which made eq/raw feature pairs inconsistent.
+export function trimSilence(x, sr, relDb = -60, floorDb = -75, padMs = 10) {
+  let peak = 0;
+  for (const v of x) peak = Math.max(peak, Math.abs(v));
+  const thresh = Math.max(peak * 10 ** (relDb / 20), 10 ** (floorDb / 20));
   let a = 0, b = x.length - 1;
   while (a < x.length && Math.abs(x[a]) < thresh) a++;
   while (b > a && Math.abs(x[b]) < thresh) b--;
